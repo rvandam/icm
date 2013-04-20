@@ -1,0 +1,323 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use LWP;
+use Data::Dumper;
+use Getopt::Long;
+
+my $args = {};
+GetOptions($args => 'user|u=s', 'movies|m', 'moviesfirst', 'sort|s=s', 'debug|d', 'year|y=i', 'listmin|l=i');
+$args->{'sort'} ||= '';
+$args->{'listmin'} ||= 50;
+
+my $base = 'http://www.icheckmovies.com';
+my $username = $args->{'user'} || 'rvandam';
+my $url = "$base/profiles/progress/?user=$username";
+local $| = 1;
+
+=old example
+
+<li class="genretop250 left imdb" style="display: block;"> <a title="View the Top 250 movies seen by rvandam" href="/list/top+250/rvandam/" class="title icon genreIcon"><span>Top 250</span></a> <span title="41%" class="count">103 / 250</span> <span style="width: 41%;" class="percentage">(41%)</span> </li>
+
+<li class="genretop250 left imdb"> <a class="title icon genreIcon" href="/list/top+250/rvandam/" title="View the Top 250 movies seen by rvandam"><span>Top 250</span></a> <span class="count" title="41%">103 / 250</span> <span class="percentage" style="width: 41%">(41%)</span> </li>
+
+<li class="genresci-fi right imdb"> <a title="View the top Sci-fi movies" href="/list/sci-fi/rvandam/" class="title icon genreIcon"><span>Sci-fi</span></a> <span title="66%" class="count"><span class="topListRank"><a title="View Your position in the Sci-fi top users chart" href="/profile/top/sci-fi/page+279/#rvandam">#2383</a></span>, 33 / 50</span> <span style="width: 66%;" class="percentage">(66%)</span> </li>
+
+    my ($class, $link, $title, $percent, $seen, $total) = $li =~ /
+        class="\s*(genre\w+) # genre or class
+        .*?
+        href="([^"]+)"       # link
+        .*?
+        <span>([^<]+)        # full title
+        .*?
+        title="(\d+)%"\s*>   # percentage
+        .*?
+        (\d+)                # seen count
+        \s*
+        \/
+        \s*
+        (\d+)                # total count
+    /xms;
+
+
+=new example
+
+      <li class="listItem listItemSmall listItemToplist listItemProgress listItemProgressOdd clearfix institute">
+                <span class="progressPercentage">
+                    <span class="progress" title="You\'ve seen 8.8% of this list." style="width: 8.8%;">
+                        You\'ve seen 8.8% of this list.
+                    </span>
+                        </span>
+
+            <div class="listImage listImageAvatar listImageIcon">
+                <img class="avatar" src="/var/toplistavatar/small/0/113.jpg" alt="100 Best British films\'s icon" width="21" height="21" />
+            </div>
+
+            <h3>
+                <a class="title icon genreIcon" href="/lists/100+best+british+films/?user=rvandam" title="View the 100 Best British films top list">
+                        <span>100 Best British films</span>
+                </a>
+            </h3>
+
+            <span class="rank" title="View your position in the top list\'s top users ranking">
+                9 / 102<br />
+                                <a href="/lists/100+best+british+films/topusers/?page=728#profile-rvandam">#9423</a>
+                            </span>
+
+                    </li>
+=cut
+
+print "fetching $url..." if $args->{'debug'};
+my $ua = LWP::UserAgent->new;
+my $response = $ua->get($url);
+my $content = $response->content;
+$content =~ s/^.*progressall//xms;
+my @lis = split "<li", $content;
+print "done.\r" if $args->{'debug'};
+#print Dumper \@lis;
+
+my @lists;
+foreach my $li (@lis) {
+    next if $li !~ /^\s+class="listItem/;
+    $li =~ s/&#039;/'/g;
+    my ($percent, $link, $title, $seen, $total) = $li =~ /
+        seen\s*([\d\.]+)%     # percentage seen
+        .*?
+        href="([^"]+)"        # link
+        .*?
+        title="View\ the\ ([^"]+)\ top\ list" # title
+        .*?
+        <span[^>]+>\s*
+        (\d+)                 # seen
+        \s*
+        \/
+        \s*
+        (\d+)                 # total
+    /xms;
+    my ($rank) = $li =~ /\#(\d+)/xms;
+
+    print Dumper $li, $percent, $link, $title, $seen, $total, $rank and die if ! defined $percent;
+    next if $seen == 0;
+    next if $seen == $total;
+    push @lists, {
+        title => $title,
+        link => $link,
+        percent => $total ? (100 * $seen / $total) : $percent,
+        rank => $rank || 0,
+        seen => $seen,
+        total => $total,
+        (map { +"rem$_" => int($total * $_ / 100 - $seen + 0.5) } (50, 75, 90, 100)),
+    };
+    (my $next_percent) = grep { $lists[-1]->{"rem$_"} > 0 } (50, 75, 90, 100);
+    $lists[-1]->{'next_percent'} = $next_percent;
+    $lists[-1]->{'next_remaining'} = $lists[-1]->{"rem$next_percent"} || 0;
+}
+
+sub by_pct { $b->{'percent'} <=> $a->{'percent'} }
+sub by_tot { $b->{'total'} <=> $a->{'total'} || $b->{'percent'} <=> $a->{'percent'} }
+sub by_rank { ($a->{'rank'} || 50000) <=> ($b->{'rank'} || 50000) }
+sub by_rem50 { $a->{'rem50'} <=> $b->{'rem50'} }
+sub by_rem75 { $a->{'rem75'} <=> $b->{'rem75'} }
+sub by_rem100 { $a->{'rem100'} <=> $b->{'rem100'} }
+sub by_next { $a->{'next_remaining'} <=> $b->{'next_remaining'} || $b->{'percent'} <=> $a->{'percent'} }
+sub by_nextp { $a->{'next_percent'} <=> $b->{'next_percent'} || $a->{'next_remaining'} <=> $b->{'next_remaining'} || $b->{'percent'} <=> $a->{'percent'} }
+sub by_scifi { $b->{'title'} =~ /sci.?fi/i cmp $a->{'title'} =~ /sci.?fi/i }
+sub by_checked { ($b->{'title'} =~ /Most Checked/) cmp ($a->{'title'} =~ /Most Checked/) || $a->{'next_remaining'} <=> $b->{'next_remaining'} || $b->{'percent'} <=> $a->{'percent'} }
+my $sort = $args->{'sort'} eq 'next' ? \&by_next
+         : $args->{'sort'} eq 'tot'  ? \&by_tot
+         : $args->{'sort'} eq 'scifi' ? \&by_scifi
+         : $args->{'sort'} eq 'rem50' ? \&by_rem50
+         : $args->{'sort'} eq 'rem100' ? \&by_rem100
+         : $args->{'sort'} eq 'nextp' ? \&by_nextp
+         : $args->{'sort'} eq 'checked' ? \&by_checked
+         : $args->{'sort'} eq 'rank' ? \&by_rank
+         : \&by_pct;
+my @ordered = sort $sort sort by_next @lists;
+
+my $movies = {};
+my $moviesfirst = {};
+sub best_next {
+    $movies->{$b}->{'count'} <=> $movies->{$a}->{'count'} ||
+    $movies->{$a}->{'sum_rem'} <=> $movies->{$b}->{'sum_rem'} ||
+    $movies->{$a}->{'low_rem'} <=> $movies->{$b}->{'low_rem'} ||
+    $movies->{$a}->{'rank'} <=> $movies->{$b}->{'rank'} ||
+    $a cmp $b
+}
+sub by_score {
+    $movies->{$b}->{'count'} <=> $movies->{$a}->{'count'} ||
+    $movies->{$a}->{'score'} <=> $movies->{$b}->{'score'} ||
+    $movies->{$a}->{'low_rem'} <=> $movies->{$b}->{'low_rem'} ||
+    $movies->{$a}->{'rank'} <=> $movies->{$b}->{'rank'} ||
+    $a cmp $b
+}
+
+my $max_lists = 160;
+
+# find the longest list title so we can stretch accordingly
+my $i = 0;
+my $longest = 0;
+foreach (@ordered) {
+    next if $args->{'listmin'} && $args->{'listmin'} > $_->{'total'};
+    my $len = length $_->{'title'};
+    $longest = $len if $len > $longest;
+    last if $i++ > $max_lists;
+}
+
+# print out all the titles (with movies if requested)
+$i = 0;
+foreach (@ordered) {
+#    next if ($_->{'next_remaining'} || 0) == 0;
+    next if $args->{'listmin'} && $args->{'listmin'} > $_->{'total'};
+#    next if ($_->{'title'} =~ /\s+/) < 1;
+    printf "%${longest}s - #%5d - %4d / %4d (%3d%%) (%3d to %2d%%) (%d %d %d %d)\n", map { $_ || 0 } @{ $_ }{ qw(title rank seen total percent next_remaining next_percent rem50 rem75 rem90 rem100) };
+    get_movies($_) if $args->{'movies'} || $args->{'moviesfirst'};
+    my $count = 0;
+    foreach my $movie (sort by_score grep { $movies->{$_} > 1 } keys %$movies) {
+        my $info = $movies->{$movie};
+        next if $info->{'count'} == 1;
+        last if $count++ > 9;
+        printf "%d - %0.1f: %s (ranked #%d with %d to go)\n", $info->{'count'}, $info->{'score'}, $movie, $info->{'rank'}, $info->{'low_rem'};
+    }
+    last if $i++ > $max_lists;
+}
+
+=old example
+<li class="movie all checked loggedinuserunchecked favorite nothated notwatch rankNeutral updateFilter updateCount">
+    <div class="rank">1 
+        <span class="rankdifference">
+            <span class="neutral">-</span>
+        </span>
+    </div>
+    <div class="cover expandable"> 
+        <a class="dvdCoverSmall" href="/movie/avatar/" title="View detailed information on Avatar (2009)"></a>
+        <div class="coverImage" style="background: url(/var/covers/small/avatar.jpg);"></div> 
+        <div class="coverImageMedium noimage" style="display: none;"></div> 
+    </div> 
+    <a href="/login/" class="checkbox" title="Check Avatar" rel="nofollow">
+        <span>Check</span>
+    </a>
+    <a href="#" class="showOptionMenu showMovieOptionMenu" title="Show options for this movie" rel="nofollow">
+        <span>More options</span>
+    </a>
+    <ul class="optionMenu movieOptionMenu" style="display: none;">
+        <li>
+            <a class="optionIcon optionIMDB external" href="http://www.imdb.com/title/tt0499549/" title="Visit IMDb page">Visit IMDb page</a>
+        </li>
+        <li>
+            <a class="optionIcon optionHistory" href="/movie/avatar/history/all-time+worldwide+box+office/" title="Visit history of Avatar in All-Time Worldwide Box office">View history</a>
+        </li>
+    </ul>
+    <h2><a href="/movie/avatar/" title="View detailed information on Avatar (2009)">Avatar</a></h2>
+    <span class="year">2009</span>
+</li> 
+
+=new example
+
+<li id="m1234-u-movie" class="listItem listItemMovie movie all neutral unchecked loggedinuserunchecked notfavorite nothated notwatch notowned updateFilter">
+                                <div class="rank">
+                        30 <span class="positiondifference"><span class="neutral">-</span></span>
+                </div>
+                        
+                <div class="listImage listImageCover">
+                        <a class="dvdCoverSmall" href="/movies/dawn+of+the+dead/" title="View detailed information on Dawn of the Dead (1978)"></a>
+                        <div class="coverImage" style="background: url(/var/covers/small/dawn+of+the+dead.jpg);"></div>
+                </div>
+                
+                <h2>
+                        <a href="/movies/dawn+of+the+dead/" title="View detailed information on Dawn of the Dead (1978)">Dawn of the Dead</a>
+                </h2>
+                
+                <span class="info">
+        1978
+        
+        &mdash; a.k.a. <em>Dawn of the Living Dead</em></span>
+
+<ul class="tagList clearfix">
+        <li>
+                <a class="tagIcon tagNamespaceMediatype" href="/lists/sci-fi/?user=rvandam&amp;tags=mediatype%3Amovie">movie</a>
+            </li>
+        <li>
+                <a class="tagIcon tagNamespaceUser" href="/lists/sci-fi/?user=rvandam&amp;tags=user%3Aicheckmovies">icheckmovies</a>
+            </li>
+        <li>
+                <a class="tagIcon tagNamespaceYear" href="/lists/sci-fi/?user=rvandam&amp;tags=year%3A1978">1978</a>
+            </li>
+    </ul>               
+                                <a href="/login/" class="checkbox" title="Check Dawn of the Dead" rel="nofollow"><span>Check</span></a>
+                                
+                <ul class="optionIconMenu optionIconMenuCheckbox">
+                <li>
+                        <a class="optionIcon optionMarkFavorite" id="m495-u-markfavorite" href="#" title="Mark movie as favorite">Mark movie as favorite</a>
+                </li>
+                
+                <li>
+                        <a class="optionIcon optionMarkNotLike" id="m495-u-marknotlike" href="#" title="Dislike this movie">Dislike this movie</a>
+                </li>
+        
+    
+    
+                <li>
+                        <a class="optionIcon optionAddWatchlist" id="m495-u-addwatchlist" href="#" title="Add movie to watchlist">Add movie to watchlist</a>
+                </li>
+        
+                <li>
+                        <a class="optionIcon optionMarkOwned paidFeature" href="/register/changeplan/?feature=movie-owned" title="Mark movie as owned">Mark movie as owned</a>
+                        </li>
+        
+                <li>
+                <a class="optionIcon optionCheckMovie" id="m495-u-checkmovies" href="#" title="Check movie">Check movie</a>
+        </li>
+
+=cut
+
+sub get_movies {
+    my $li = shift;
+
+    print "Fetching movies from $li->{'link'}..." if $args->{'debug'};
+
+    my $response = $ua->get("$base$li->{'link'}");
+    print "done.\r" if $args->{'debug'};
+    my @lis = split /<li id="m\d+-u-movie"/, $response->content;
+#    print Dumper \@lis;
+
+    my $rem = $li->{'next_remaining'};
+
+    print "Reading movies..." if $args->{'debug'};
+    my @movies;
+    my $firstlist = ! scalar keys %$movies;
+    foreach my $li (@lis) {
+        next if $li !~ /^\s*class="listItem.*?movie\ all\ \w+\ unchecked/xms;
+        print "." if $args->{'debug'};
+        $li =~ s/&#039;/'/g;
+        my ($rank, $title, $year) = $li =~ /
+            <div\ class="rank">\s*
+            (\d+)                # rank
+            .*?
+            <h2>\s*<a[^>]+>([^<]+)  # title
+            .*?
+            info">\s*
+            (\d+)                # year
+        /xms;
+        print Dumper $li and die if ! $title;
+        my $key = "$title ($year)";
+
+        # if 'moviesfirst' only count movies on the first list
+        $moviesfirst->{$key}++ if $firstlist;
+        next if $args->{'moviesfirst'} && ! $moviesfirst->{$key};
+
+        next if $args->{'year'} && ($year || 0) < $args->{'year'};
+
+        $movies->{$key}->{'count'}++;
+        $movies->{$key}->{'sum_rem'} += $rem;
+        $movies->{$key}->{'score'} = $movies->{$key}->{'sum_rem'} / $movies->{$key}->{'count'};
+        my $low = $movies->{$key}->{'low_rem'};
+        if (! $low || $rem < $low) {
+            $movies->{$key}->{'rank'} = $rank;
+            $movies->{$key}->{'low_rem'} = $rem
+        }
+    }
+    # overwrite the '.'s
+    print "\r" if $args->{'debug'};
+}

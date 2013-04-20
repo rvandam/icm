@@ -1,0 +1,109 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use LWP;
+use Data::Dumper;
+use Getopt::Long;
+use HTTP::Cookies;
+
+my $args = {};
+GetOptions($args => 'user|u=s', 'movies|m', 'moviesfirst', 'sort|s=s', 'debug|d', 'year|y=i', 'listmin|l=i');
+$args->{'sort'} ||= '';
+$args->{'listmin'} ||= 50;
+
+my $base = 'http://www.icheckmovies.com';
+my $username = $args->{'user'} || 'rvandam';
+my $url = "$base/profiles/progress/?user=$username";
+local $| = 1;
+
+=new example
+
+      <li class="listItem listItemSmall listItemToplist listItemProgress listItemProgressOdd clearfix institute">
+                <span class="progressPercentage">
+                    <span class="progress" title="You\'ve seen 8.8% of this list." style="width: 8.8%;">
+                        You\'ve seen 8.8% of this list.
+                    </span>
+                        </span>
+
+            <div class="listImage listImageAvatar listImageIcon">
+                <img class="avatar" src="/var/toplistavatar/small/0/113.jpg" alt="100 Best British films\'s icon" width="21" height="21" />
+            </div>
+
+            <h3>
+                <a class="title icon genreIcon" href="/lists/100+best+british+films/?user=rvandam" title="View the 100 Best British films top list">
+                        <span>100 Best British films</span>
+                </a>
+            </h3>
+
+            <span class="rank" title="View your position in the top list\'s top users ranking">
+                9 / 102<br />
+                                <a href="/lists/100+best+british+films/topusers/?page=728#profile-rvandam">#9423</a>
+                            </span>
+
+                    </li>
+=cut
+
+print "fetching $url..." if $args->{'debug'};
+# Load the initial page
+my $cookie_jar = HTTP::Cookies->new(
+    file => "$ENV{'PWD'}/cookies.dat",
+    autosave => 1,
+);
+my $ua = LWP::UserAgent->new;
+$ua->cookie_jar($cookie_jar);
+my $response = $ua->get($url);
+my $content = $response->content;
+$content =~ s/^.*progressall//xms;
+my @lis = split "<li", $content;
+print "done.\r" if $args->{'debug'};
+#print Dumper \@lis;
+
+# TODO: this parsing is copied from icm_progress, should convert to a shared module
+my @lists;
+foreach my $li (@lis) {
+    next if $li !~ /^\s+class="listItem/;
+    $li =~ s/&#039;/'/g;
+    my ($percent, $link, $title, $seen, $total) = $li =~ /
+        seen\s*([\d\.]+)%     # percentage seen
+        .*?
+        href="([^"]+)"        # link
+        .*?
+        title="View\ the\ ([^"]+)\ top\ list" # title
+        .*?
+        <span[^>]+>\s*
+        (\d+)                 # seen
+        \s*
+        \/
+        \s*
+        (\d+)                 # total
+    /xms;
+    my ($rank) = $li =~ /\#(\d+)/xms;
+
+    print Dumper $li, $percent, $link, $title, $seen, $total, $rank and die if ! defined $percent;
+    next if $seen == 0;
+    next if $seen == $total;
+    push @lists, {
+        title => $title,
+        link => $link,
+        percent => $total ? (100 * $seen / $total) : $percent,
+        rank => $rank || 0,
+        seen => $seen,
+        total => $total,
+        (map { +"rem$_" => int($total * $_ / 100 - $seen + 0.5) } (50, 75, 90, 100)),
+    };
+    (my $next_percent) = grep { $lists[-1]->{"rem$_"} > 0 } (50, 75, 90, 100);
+    $lists[-1]->{'next_percent'} = $next_percent;
+    $lists[-1]->{'next_remaining'} = $lists[-1]->{"rem$next_percent"} || 0;
+}
+
+foreach my $list (@lists) {
+    my $link = $list->{'link'};
+
+    my $url = $base . $link . '?export';
+    print '#', $url, "\n";
+    warn '#', $url, "\n";
+    my $resp = $ua->get($url);
+    print $resp->content;
+}

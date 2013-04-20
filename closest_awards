@@ -1,0 +1,170 @@
+#!/usr/bin/perl
+
+=head1
+
+closest_awards - try to compute a list of movies to watch to find the next closests awards
+
+=cut
+
+use strict;
+use warnings;
+
+use utf8;
+
+use Getopt::Long;
+use Text::CSV;
+use Data::Dumper;
+
+# maybe this should be read from the file, in case it changes?
+my $TITLE = 2;
+my $YEAR = 3;
+my $OFFICIAL = 8;
+my $IMDB = 11;
+my $CHECKED = 12;
+my $percents = [.50, .75, .90, 1];
+
+my $args = {};
+GetOptions($args => qw(listmin|l=i listsort=s sort|s=s export), 'pass_through');#'user|u=s', 'movies|m', 'moviesfirst', 'sort|s=s', 'debug|d', 'year|y=i', 'listmin|l=i');
+$args->{'listsort'} ||= 'remaining';
+$args->{'sort'} ||= '';
+
+my $owned = get_owned();
+
+my $filename = shift @ARGV || 'full_export.csv';
+
+my $csv = Text::CSV->new({ binary => 1 }) or die "error starting csv: " . Text::CSV->error_diag();
+open my $fh, "<", $filename or die "error opening read file: $!";
+
+my $movies = {};
+my $lists = {};
+my $mlists = {};
+my $list = '';
+while (my $line = $csv->getline($fh)) {
+    next if ! $line;
+    if ($line->[0] =~ m{^\#.*lists/(.*)/}) {
+        my $next_list = $1;
+        next_award($lists->{$list}) if $list;
+        $list = $next_list;
+        $lists->{$list}->{'list'} = $list;
+        next;
+    }
+    next if $line->[0] eq 'rank';
+    my $imdb = $line->[$IMDB];
+    $movies->{$imdb} = $line;
+    push @{ $mlists->{$imdb} }, $list;
+    $lists->{$list}->{'movies'}->{$imdb} = $line;
+    $lists->{$list}->{'all'}++;
+    $lists->{$list}->{'checked'}++ if $line->[$CHECKED] ne 'no';
+}
+next_award($lists->{$list}) if $list;
+my @sorted = get_sorted_lists($lists);
+my $done = 0;
+OUTER: while (@sorted && $done++ < 30) {
+    my $ref = $sorted[0];
+
+#    print "$_->{'remaining'} $_->{'list'}\n" foreach @sorted[0..9];
+
+    printf "%4d %0.2f %4d/%4d %s\n", @{ $ref }{ qw(remaining next_award checked all list) } if ! $args->{'export'};
+    my @movies = get_sorted_movies($ref->{'movies'});
+    my $rem = $ref->{'remaining'};
+    my $next = $ref->{'next_award'};
+    my $is_alt = 0;
+    foreach my $i (0..($rem+3)) {
+        my $movie = $movies[$i];
+        next if ! $movie;
+        my $imdb = $movie->[$IMDB];
+        $is_alt = 1 if $i >= $rem;
+        if ($args->{'export'}) {
+            print $movie->[$IMDB], "\n";
+        } else {
+            print "\talternates:\n" if $i == $rem && ! $is_alt;
+            print "\t" if $is_alt;
+            printf "\t- %2d %s %s %s\n", @{ $movie }[$OFFICIAL, $TITLE, $YEAR], ''; #, '(' . join(', ', @{ $mlists->{$imdb} }) . ')';
+        }
+
+        # skip any alternatives for the uploaded dump
+        last if $i >= $rem && $args->{'export'};
+
+        # don't count alternates as used, they are just fyi
+        next if $i >= $rem;
+
+        # now mark this movie as watched
+        $movie->[$CHECKED] = 'yes';
+
+        # now adjust all the lists that this movie was on
+        my $next = 0;
+        foreach my $list (@{ $mlists->{$imdb} }) {
+            my $ref2 = $lists->{$list};
+            $ref2->{'movies'}->{$imdb}->[$CHECKED] = 'yes';
+            $ref2->{'checked'}++;
+            next_award($ref2);
+#            printf "\t\t%4d %0.2f %s\n", $ref2->{'remaining'}, $ref2->{'next_award'}, $list;
+
+        }
+
+        # reset the sorted list, since it might have changed
+        @sorted = get_sorted_lists($lists);
+
+#        print "$_->{'remaining'} $_->{'list'} " foreach @sorted[0..9];
+#        print "\n";
+
+        # if a different list has now sorted to the top, remember that we should quit this list after updating all lists
+        $next = $sorted[0]->{'list'} eq $ref->{'list'} ? 0 : 1;
+
+        if ($next && $i < $rem) {
+            last if $args->{'export'};
+            $is_alt = 1;
+            print "\talternates:\n";
+        }
+    }
+
+}
+#print Dumper $lists;
+#http://www.icheckmovies.com/lists/100+animated+feature+films+bfi+screen+guides/?export
+#rank,rankdifference,title,year,url,checkedcount,favouritecount,dislikedcount,officialtoplistcount,usertoplistcount,akatitle,imdburl,checked,favorite,disliked,watchlist,owned
+#1,0,"The Adventures of Prince Achmed",1926,http://www.icheckmovies.com/movies/die+abenteuer+des+prinzen+achmed/,1110,107,3,6,53,"Die Abenteuer des Prinzen Achmed",http://www.imdb.com/title/tt0015532/,"2011-07-24 00:57:04",no,no,no,no
+
+sub get_owned {
+    open my $file, '<', 'owned.txt' or die "Unable to open owned.txt: $!";
+    my @owned = <$file>;
+    close $file;
+    chomp @owned;
+    return { map { $_ => 1 } @owned };
+}
+
+sub next_award {
+    my $ref = shift;
+    my $all = $ref->{'all'} || 0;
+    my $checked = $ref->{'checked'} || 0;
+    foreach my $percent (@$percents) {
+        my $remaining = int($all * $percent - $checked + 0.999);
+        next if $remaining < 1;
+        $ref->{'next_award'} = $percent;
+        $ref->{'remaining'} = $remaining;
+        last;
+    }
+    $ref->{'remaining'} = 0 if $ref->{'checked'} == $ref->{'all'};
+    $ref->{'remaining'} ||= 0;
+    $ref->{'next_award'} ||= 2;
+}
+
+sub get_sorted_lists {
+    my $lists = shift;
+    my @sorted = grep { $_->{'remaining'} }
+                 sort { $a->{'remaining'} <=> $b->{'remaining'} || $b->{'next_award'} <=> $a->{'next_award'} || $a->{'all'} <=> $b->{'all'} }
+                 values %$lists;
+    if ($args->{'listmin'}) {
+        @sorted = grep { $_->{'all'} > $args->{'listmin'} } @sorted;
+    }
+    return @sorted;
+}
+sub get_sorted_movies {
+    my $movies = shift;
+
+    my @sorted = map { $_->[-1] }
+                 sort { $b->[0] <=> $a->[0] || $b->[1] <=> $a->[1] || $b->[2] <=> $a->[2] }
+                 map { [$owned->{$_->[$IMDB]} || 0, $args->{'sort'} eq 'year' ? $_->[$YEAR] : 0, $_->[$OFFICIAL], $_] }
+                 grep { $_->[$CHECKED] eq 'no' }
+                 values %$movies;
+    return @sorted;
+}
